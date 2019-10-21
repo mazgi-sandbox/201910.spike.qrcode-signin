@@ -1,0 +1,127 @@
+version: "3.7"
+services:
+  vscode: # for prettier
+    image: node:10
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    user: "${UID:-0}:${GID:-0}"
+    command:
+      - bash
+      - -c
+      - npm install
+  provisioning:
+    build:
+      context: Dockerfile.d/provisioning
+    working_dir: /workspace
+    volumes:
+      - provisioning-dot-config:/root/.config
+      - .:/workspace:ro
+    environment:
+      - CLOUDSDK_CORE_PROJECT=${DEV_CLOUDSDK_CORE_PROJECT_DEFAULT}
+      - GOOGLE_APPLICATION_CREDENTIALS=${DEV_GOOGLE_APPLICATION_CREDENTIALS_DEFAULT}
+      - AWS_DEFAULT_REGION=${DEV_AWS_DEFAULT_REGION}
+      - AWS_ACCESS_KEY_ID=${DEV_AWS_DEFAULT_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${DEV_AWS_DEFAULT_SECRET_ACCESS_KEY}
+    command:
+      - bash
+      - -c
+      - |
+        source .envrc
+        gcloud auth activate-service-account --key-file=${DEV_CREDENTIALS_DIR}/gcp-credentials.json
+  rev-proxy:
+    build:
+      context: Dockerfile.d/rev-proxy
+    depends_on:
+      - bff
+      - frontend
+    ports:
+      - "${BIND_IP_ADDR:-127.0.0.1}:3443:3443"
+      - "${BIND_IP_ADDR:-127.0.0.1}:4443:4443"
+    environment:
+      - BIND_IP_ADDR
+    volumes:
+      - ./config.development/pki/tls/dev.crt.pem:/etc/nginx/pki/tls/dev.crt:ro
+      - ./config.development/pki/tls/dev.key.pem:/etc/nginx/pki/tls/dev.key:ro
+      - ./rev-proxy/etc/nginx/template.d:/etc/nginx/template.d:ro
+      - nginx-conf:/etc/nginx/conf.d # for debug
+    command:
+      - bash
+      - -c
+      - |
+        rm -f /etc/nginx/conf.d/*
+        envsubst '$$BIND_IP_ADDR' < /etc/nginx/template.d/bff.conf > /etc/nginx/conf.d/bff.conf
+        envsubst '$$BIND_IP_ADDR' < /etc/nginx/template.d/frontend.conf > /etc/nginx/conf.d/frontend.conf
+        nginx -g 'daemon off;'
+  mysql:
+    image: mysql:5.7
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "true"
+      MYSQL_DATABASE: "bff"
+    ports:
+      - "${BIND_IP_ADDR:-127.0.0.1}:3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+  bff:
+    build:
+      context: Dockerfile.d/bff
+      target: development
+    depends_on:
+      - mysql
+    working_dir: /workspace
+    volumes:
+      - ./bff:/workspace
+      - ./${DEV_CONFIG_DIR}/${BFF_CONFIG_SOURCE_GOOGLE_CLOUD_STORAGE_FILENAME}:/workspace/tmp/config.json:ro
+    ports:
+      - "${BIND_IP_ADDR:-127.0.0.1}:4000:4000"
+    user: "${UID:-0}:${GID:-0}"
+    environment:
+      - SSH_AUTH_SOCK
+      - BFF_PRIVATE_KEY_PEM_STRING
+      - BFF_PUBLIC_KEY_PEM_STRING
+      - BFF_MASTER_SECRET_STRING
+      - BFF_CONFIG_SOURCE_URI
+      - BFF_CONFIG_SOURCE_GOOGLE_CLOUD_STORAGE_BUCKET
+      - BFF_CONFIG_SOURCE_GOOGLE_CLOUD_STORAGE_FILENAME
+      - BFF_CREADENTIALS_CONFIG_GOOGLE_CLOUD_STORAGE
+      - BFF_CONFIG_SOURCE_AMAZON_S3_ENDPOINT
+      - BFF_CONFIG_SOURCE_AMAZON_S3_SIGNATURE_VERSION
+      - BFF_CONFIG_SOURCE_AMAZON_S3_BUCKET
+      - BFF_CONFIG_SOURCE_AMAZON_S3_FILENAME
+      - BFF_CREADENTIALS_CONFIG_AMAZON_S3_ACCESS_KEY
+      - BFF_CREADENTIALS_CONFIG_AMAZON_S3_SECRET_ACCESS_KEY
+    command:
+      - bash
+      - -c
+      - |
+        npm install
+        npm run dev
+  frontend:
+    build:
+      context: Dockerfile.d/frontend
+      target: development
+    working_dir: /workspace
+    volumes:
+      - ./frontend:/workspace
+    ports:
+      - "${BIND_IP_ADDR:-127.0.0.1}:3000:3000"
+    user: "${UID:-0}:${GID:-0}"
+    environment:
+      - SSH_AUTH_SOCK
+      - FRONTEND_ENDPOINT_URL_BFF_GRAPHQL=https://${BIND_IP_ADDR:-127.0.0.1}:4443/graphql
+    command:
+      - bash
+      - -c
+      - |
+        npm install
+        npm run dev
+volumes:
+  mysql-data:
+    driver: local
+  nginx-conf:
+    driver: local
+  provisioning-dot-config:
+    driver: local
